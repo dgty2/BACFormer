@@ -1,113 +1,74 @@
-import argparse
-import logging
-import os
-import random
-import sys
-import time
-import numpy as np
+#!/usr/bin/env python
+# BACFormer 左心房分割训练器
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from tensorboardX import SummaryWriter
-from torch.nn.modules.loss import CrossEntropyLoss
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from utils import DiceLoss
-from torchvision import transforms
-from utils import test_single_volume
-from torch.nn import functional as F
+from utils import DiceBoundaryLoss, calculate_dice
 
+# 初始化损失函数
+criterion = DiceBoundaryLoss()
 
-def trainer_synapse(args, model, snapshot_path):
-    from datasets.dataset_synapse import Synapse_dataset, RandomGenerator
-    logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
-                        format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
-    logging.info(str(args))
-    base_lr = args.base_lr
-    num_classes = args.num_classes
-    batch_size = args.batch_size * args.n_gpu
-    # max_iterations = args.max_iterations
-
-    x_transforms = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5])
-    ])
-    y_transforms = transforms.ToTensor()
-
-    db_train = Synapse_dataset(base_dir=args.root_path, list_dir=args.list_dir, split="train", img_size=args.img_size,
-                               norm_x_transform=x_transforms, norm_y_transform=y_transforms)
-
-    print("The length of train set is: {}".format(len(db_train)))
-
-    # -------------------------
-
-    # -----------------------
-    def worker_init_fn(worker_id):
-        random.seed(args.seed + worker_id)
-
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
-                             worker_init_fn=worker_init_fn)
-    if args.n_gpu > 1:
-        model = nn.DataParallel(model)
+def train_one_epoch(model, loader, optimizer, device):
+    """训练一个epoch"""
     model.train()
-    ce_loss = CrossEntropyLoss()
-    dice_loss = DiceLoss(num_classes)
-    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    writer = SummaryWriter(snapshot_path + '/log')
-    iter_num = 0
-    max_epoch = args.max_epochs
-    max_iterations = args.max_epochs * len(trainloader)  # max_epoch = max_iterations // len(trainloader) + 1
-    logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
-    best_performance = 0.0
-    iterator = tqdm(range(max_epoch), ncols=70)
-    for epoch_num in iterator:
-        for i_batch, sampled_batch in enumerate(trainloader):
-            image_batch, label_batch = sampled_batch['image'], sampled_batch['label']
-            # print("data shape---------", image_batch.shape, label_batch.shape)
-            image_batch, label_batch = image_batch.cuda(), label_batch.squeeze(1).cuda()
-            outputs = model(image_batch)
-            # outputs = F.interpolate(outputs, size=label_batch.shape[1:], mode='bilinear', align_corners=False)
-            loss_ce = ce_loss(outputs, label_batch[:].long())
-            loss_dice = dice_loss(outputs, label_batch, softmax=True)
-            loss = 0.4 * loss_ce + 0.6 * loss_dice
-            # print("loss-----------", loss)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr_
+    total_loss = 0.0
+    total_dice = 0.0
 
-            iter_num = iter_num + 1
-            writer.add_scalar('info/lr', lr_, iter_num)
-            writer.add_scalar('info/total_loss', loss, iter_num)
-            writer.add_scalar('info/loss_ce', loss_ce, iter_num)
+    for batch in loader:
+        img, label = batch["image"].to(device), batch["label"].to(device)
+        optimizer.zero_grad()
+        output = model(img)
+        loss = criterion(output, label)
+        loss.backward()
+        optimizer.step()
 
-            logging.info('iteration %d : loss : %f, loss_ce: %f' % (iter_num, loss.item(), loss_ce.item()))
+        total_loss += loss.item()
+        total_dice += calculate_dice(output, label)
 
-            if iter_num % 20 == 0:
-                image = image_batch[1, 0:1, :, :]
-                image = (image - image.min()) / (image.max() - image.min())
-                writer.add_image('train/Image', image, iter_num)
-                outputs = torch.argmax(torch.softmax(outputs, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/Prediction', outputs[1, ...] * 50, iter_num)
-                labs = label_batch[1, ...].unsqueeze(0) * 50
-                writer.add_image('train/GroundTruth', labs, iter_num)
+    avg_loss = total_loss / len(loader)
+    avg_dice = total_dice / len(loader)
+    return avg_loss, avg_dice
 
-        save_interval = 10  # int(max_epoch/6)
-        # if epoch_num > int(max_epoch / 2) and (epoch_num + 1) % save_interval == 0:
-        if (epoch_num + 1) % save_interval == 0:
-            save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
-            torch.save(model.state_dict(), save_mode_path)
-            logging.info("save model to {}".format(save_mode_path))
+def validate_one_epoch(model, loader, device):
+    """验证一个epoch"""
+    model.eval()
+    total_dice = 0.0
 
-        if epoch_num >= max_epoch - 1:
-            save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
-            torch.save(model.state_dict(), save_mode_path)
-            logging.info("save model to {}".format(save_mode_path))
-            iterator.close()
-            break
+    with torch.no_grad():
+        for batch in loader:
+            img, label = batch["image"].to(device), batch["label"].to(device)
+            output = model(img)
+            total_dice += calculate_dice(output, label)
 
-    writer.close()
-    return "Training Finished!"
+    avg_dice = total_dice / len(loader)
+    return avg_dice
+
+def train(model, train_loader, val_loader, args):
+    """完整训练流程"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=0.9, weight_decay=1e-4)
+    best_dice = 0.0
+
+    print("=" * 50)
+    print("🚀 开始左心房分割训练")
+    print(f"设备: {device} | 类别数: {args.num_classes} | 轮数: {args.max_epochs}")
+    print("=" * 50)
+
+    for epoch in range(args.max_epochs):
+        train_loss, train_dice = train_one_epoch(model, train_loader, optimizer, device)
+        val_dice = validate_one_epoch(model, val_loader, device)
+
+        # 保存最优模型
+        if val_dice > best_dice:
+            best_dice = val_dice
+            torch.save(model.state_dict(), f"{args.save_path}/best_la_model.pth")
+            print(f"✅ 新最优模型保存！Val Dice: {val_dice:.4f}")
+
+        # 打印训练日志
+        print(f"Epoch [{epoch+1}/{args.max_epochs}] | "
+              f"Train Loss: {train_loss:.4f} | "
+              f"Train Dice: {train_dice:.4f} | "
+              f"Val Dice: {val_dice:.4f}")
+
+    print("=" * 50)
+    print(f"🏁 训练完成！最优验证集Dice: {best_dice:.4f}")
+    print("=" * 50)
