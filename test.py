@@ -64,15 +64,15 @@ PROJECT_ROOT = get_project_root()
 # ========================================
 
 # 导入数据加载模块
-from datasets.dataset_synapse import Dataset_Synapse
+from datasets.dataset_left_atrium import Dataset_LeftAtrium
 
 
 # 主函数（仅用手动标注掩码计算）
 def main():
     # 1. 初始化数据集（加载影像+手动gt掩码）
-    dataset = Dataset_Synapse(
+    dataset = Dataset_LeftAtrium(
         root_path="lists",
-        list_dir="lists/lists_Synapse",
+        list_dir="lists/lists_LeftAtrium",
         split="test",
         img_size=256,
         norm_x=True

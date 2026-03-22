@@ -11,13 +11,13 @@ Our paper is currently under review by the Knowledge-Based Systems journal. Plea
 - Train
 
 ```bash
-python train.py --dataset Synapse --root_path your DATA_DIR --max_epochs 400 --output_dir your OUT_DIR  --img_size 224 --base_lr 0.05 --batch_size 12
+python train.py --dataset LeftAtrium --root_path your DATA_DIR --max_epochs 400 --output_dir your OUT_DIR  --img_size 224 --base_lr 0.05 --batch_size 12
 ```
 
 - Test 
 
 ```bash
-python test.py --dataset Synapse --is_savenii --volume_path your DATA_DIR --output_dir your OUT_DIR --max_epoch 400 --base_lr 0.05 --img_size 224 --batch_size 24
+python test.py --dataset LeftAtrium --is_savenii --volume_path your DATA_DIR --output_dir your OUT_DIR --max_epoch 400 --base_lr 0.05 --img_size 224 --batch_size 24
 ```
 
 ## References
