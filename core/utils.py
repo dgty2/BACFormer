@@ -14,26 +14,32 @@ def load_nii(file_path):
     return data, pixdim
 
 
-def load_label_mask(img_file_path):
-    """根据影像路径，自动加载对应的手动标注掩码（_gt.nii.gz）"""
-    case_id = os.path.basename(img_file_path).replace(".nii.gz", "").replace(".nii", "")
-    # 适配你的 lists/img → lists/label 结构
-    parts = img_file_path.split(os.sep)
-    if "img" in parts:
-        lists_idx = parts.index("img") - 1
-        lists_dir = os.sep.join(parts[:lists_idx + 1])
-    else:
-        lists_dir = os.path.dirname(img_file_path)
+def load_label_mask(img_path):
+    """
+    从影像路径加载对应的手动掩码（gt）
+    :param img_path: 影像文件路径（示例：.../lists/img/patient0004_4CH_ES.nii.gz）
+    :return: 掩码 numpy 数组
+    """
+    # 1. 提取病例 ID（去掉 .nii.gz/.nii 后缀）
+    base_name = os.path.basename(img_path)
+    case_id = base_name.replace(".nii.gz", "").replace(".nii", "")
 
-    label_path = os.path.join(lists_dir, "label", f"{case_id}_gt.nii.gz")
-    if not os.path.exists(label_path):
-        label_path = os.path.join(lists_dir, "label", f"{case_id}_gt.nii")
+    # 2. 定位 label 目录（从 img 目录回退到 lists 目录，再进入 label）
+    img_dir = os.path.dirname(img_path)  # .../lists/img
+    lists_dir = os.path.dirname(img_dir)  # .../lists
+    label_dir = os.path.join(lists_dir, "label")  # .../lists/label
 
+    # 3. 拼接正确的掩码路径（和你的文件结构完全匹配）
+    label_path = os.path.join(label_dir, f"{case_id}_gt.nii.gz")
+
+    # 4. 检查文件是否存在
     if not os.path.exists(label_path):
         raise FileNotFoundError(f"未找到对应掩码：{label_path}")
 
-    mask_data, _ = load_nii(label_path)
-    return mask_data
+    # 5. 加载并返回掩码数据
+    mask_nii = nib.load(label_path)
+    mask_data = mask_nii.get_fdata()
+    return mask_data.astype(np.int32)
 
 
 def slice_to_qimage(slice_data, mask=None):
