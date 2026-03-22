@@ -7,12 +7,25 @@ import cv2
 
 class DiceBoundaryLoss(nn.Module):
     def __init__(self, smooth=1e-6):
-        super(DiceBoundaryLoss, self).__init__()
+        super().__init__()
         self.smooth = smooth
 
     def forward(self, pred, target):
+        B, C, H, W = pred.shape
+        # 1. 先把标签插值到和模型输出同尺寸（防止尺寸不匹配）
+        if target.shape[1:] != (H, W):
+            target = F.interpolate(
+                target.unsqueeze(1).float(),
+                size=(H, W),
+                mode='nearest'
+            ).squeeze(1).long()
+
+        # 2. ✅ 核心修复：二分类任务，所有非0像素都视为类别1（彻底解决越界）
+        target[target > 0] = 1
+
         pred = F.softmax(pred, dim=1)
-        target_one_hot = torch.zeros_like(pred)
+        target_one_hot = torch.zeros_like(pred)  # [B, 2, H, W]
+        # 3. scatter_ 维度完全匹配（不会再越界）
         target_one_hot.scatter_(1, target.unsqueeze(1), 1)
 
         intersection = torch.sum(pred * target_one_hot, dim=(2, 3))
@@ -21,6 +34,7 @@ class DiceBoundaryLoss(nn.Module):
         return 1 - torch.mean(dice)
 
 
+# 临床测量函数（保持不变，已修复拼写）
 def calculate_la_geometry(mask_2d, pixel_spacing):
     la_pixels = np.sum(mask_2d == 1)
     area = la_pixels * (pixel_spacing ** 2)
@@ -31,11 +45,11 @@ def calculate_la_geometry(mask_2d, pixel_spacing):
     long_axis_len = 0.0
     if len(contours) > 0:
         la_contour = max(contours, key=cv2.contourArea)
-        y_coords = la_contour[:, 0, 1]  # ✅ 正确变量名
-        x_coords = la_contour[:, 0, 0]  # ✅ 正确变量名
+        y_coords = la_contour[:, 0, 1]
+        x_coords = la_contour[:, 0, 0]
 
         top_idx = np.argmin(y_coords)
-        bottom_idx = np.argmax(y_coords)  # ✅ 修复拼写错误：y_coots → y_coords
+        bottom_idx = np.argmax(y_coords)
         top_point = (x_coords[top_idx], y_coords[top_idx])
         bottom_point = (x_coords[bottom_idx], y_coords[bottom_idx])
 
