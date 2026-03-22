@@ -1,74 +1,77 @@
-#!/usr/bin/env python
-# BACFormer 左心房分割训练器
 import torch
-from utils import DiceBoundaryLoss, calculate_dice
+import torch.nn as nn
+import torch.optim as optim
+import os
+import numpy as np
+from tqdm import tqdm
+from core.metrics import DiceBoundaryLoss, calculate_dice
 
-# 初始化损失函数
-criterion = DiceBoundaryLoss()
 
-def train_one_epoch(model, loader, optimizer, device):
-    """训练一个epoch"""
-    model.train()
-    total_loss = 0.0
-    total_dice = 0.0
+class Trainer:
+    def __init__(self, model, train_loader, val_loader, args):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.args = args
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    for batch in loader:
-        img, label = batch["image"].to(device), batch["label"].to(device)
-        optimizer.zero_grad()
-        output = model(img)
-        loss = criterion(output, label)
-        loss.backward()
-        optimizer.step()
+        self.criterion = DiceBoundaryLoss()
+        self.optimizer = optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=1e-5)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=args.max_epochs)
 
-        total_loss += loss.item()
-        total_dice += calculate_dice(output, label)
+        self.best_dice = 0.0
+        os.makedirs(args.output_dir, exist_ok=True)
 
-    avg_loss = total_loss / len(loader)
-    avg_dice = total_dice / len(loader)
-    return avg_loss, avg_dice
+    def train_epoch(self):
+        self.model.train()
+        total_loss = 0.0
 
-def validate_one_epoch(model, loader, device):
-    """验证一个epoch"""
-    model.eval()
-    total_dice = 0.0
+        for images, masks in tqdm(self.train_loader):
+            images, masks = images.to(self.device), masks.to(self.device).long()
 
-    with torch.no_grad():
-        for batch in loader:
-            img, label = batch["image"].to(device), batch["label"].to(device)
-            output = model(img)
-            total_dice += calculate_dice(output, label)
+            self.optimizer.zero_grad()
+            outputs = self.model(images)
+            loss = self.criterion(outputs, masks)
+            loss.backward()
+            self.optimizer.step()
 
-    avg_dice = total_dice / len(loader)
-    return avg_dice
+            total_loss += loss.item()
 
-def train(model, train_loader, val_loader, args):
-    """完整训练流程"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=0.9, weight_decay=1e-4)
-    best_dice = 0.0
+        return total_loss / len(self.train_loader)
 
-    print("=" * 50)
-    print("🚀 开始左心房分割训练")
-    print(f"设备: {device} | 类别数: {args.num_classes} | 轮数: {args.max_epochs}")
-    print("=" * 50)
+    def val_epoch(self):
+        self.model.eval()
+        total_dice = 0.0
 
-    for epoch in range(args.max_epochs):
-        train_loss, train_dice = train_one_epoch(model, train_loader, optimizer, device)
-        val_dice = validate_one_epoch(model, val_loader, device)
+        with torch.no_grad():
+            for images, masks in self.val_loader:
+                images, masks = images.to(self.device), masks.to(self.device).long()
+                outputs = self.model(images)
+                preds = torch.argmax(outputs, dim=1)
 
-        # 保存最优模型
-        if val_dice > best_dice:
-            best_dice = val_dice
-            torch.save(model.state_dict(), f"{args.save_path}/best_la_model.pth")
-            print(f"✅ 新最优模型保存！Val Dice: {val_dice:.4f}")
+                for pred, mask in zip(preds, masks):
+                    pred_np = pred.cpu().numpy()
+                    mask_np = mask.cpu().numpy()
+                    dice = calculate_dice(pred_np, mask_np)
+                    total_dice += dice
 
-        # 打印训练日志
-        print(f"Epoch [{epoch+1}/{args.max_epochs}] | "
-              f"Train Loss: {train_loss:.4f} | "
-              f"Train Dice: {train_dice:.4f} | "
-              f"Val Dice: {val_dice:.4f}")
+        return total_dice / len(self.val_loader.dataset)
 
-    print("=" * 50)
-    print(f"🏁 训练完成！最优验证集Dice: {best_dice:.4f}")
-    print("=" * 50)
+    def train(self):
+        print(f"开始训练，设备：{self.device}")
+        for epoch in range(1, self.args.max_epochs + 1):
+            train_loss = self.train_epoch()
+            val_dice = self.val_epoch()
+            self.scheduler.step()
+
+            print(f"Epoch {epoch}/{self.args.max_epochs} | Train Loss: {train_loss:.4f} | Val Dice: {val_dice:.4f}")
+
+            if val_dice > self.best_dice:
+                self.best_dice = val_dice
+                torch.save(self.model.state_dict(), os.path.join(self.args.output_dir, "best_model.pth"))
+                print(f"✅ 最优权重已保存，Dice: {self.best_dice:.4f}")
+
+            if epoch % 10 == 0:
+                torch.save(self.model.state_dict(), os.path.join(self.args.output_dir, f"epoch_{epoch}.pth"))
+
+        print(f"训练完成！最优Dice: {self.best_dice:.4f}")

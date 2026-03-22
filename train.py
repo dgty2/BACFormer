@@ -1,40 +1,42 @@
-#!/usr/bin/env python
-# BACFormer 左心房分割训练启动脚本
 import argparse
 import torch
-from torch.utils.data import DataLoader
 from datasets.dataset_left_atrium import Dataset_LeftAtrium
+from torch.utils.data import DataLoader
 from networks.BACFormer import BACFormer
-from trainer import train
-import os
+from trainer import Trainer
 
-def main():
+
+def parse_args():
     parser = argparse.ArgumentParser(description="BACFormer 左心房分割训练")
-    parser.add_argument("--root_path", default="./data/LeftAtrium", type=str, help="数据集根目录（含img/和label/）")
-    parser.add_argument("--list_dir", default="./lists/lists_LeftAtrium", type=str, help="样本列表目录")
-    parser.add_argument("--num_classes", default=1, type=int, help="左心房=1 类（二分类）")
-    parser.add_argument("--img_size", default=224, type=int, help="输入图像尺寸")
-    parser.add_argument("--batch_size", default=1, type=int, help="批次大小（小显存电脑用 1）")
-    parser.add_argument("--max_epochs", default=50, type=int, help="训练轮数")
-    parser.add_argument("--base_lr", default=0.01, type=float, help="初始学习率")
-    parser.add_argument("--save_path", default="./model_out", type=str, help="模型保存路径")
+    parser.add_argument("--dataset", type=str, default="LeftAtrium")
+    parser.add_argument("--root_path", type=str, default="./")
+    parser.add_argument("--list_dir", type=str, default="./lists/lists_LeftAtrium")
+    parser.add_argument("--max_epochs", type=int, default=50)
+    parser.add_argument("--output_dir", type=str, default="weights")
+    parser.add_argument("--img_size", type=int, default=224)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--base_lr", type=float, default=0.05)
+    parser.add_argument("--val_epoch", type=int, default=10)
+    parser.add_argument("--num_classes", type=int, default=2)
+    parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
+    return args
 
-    # 创建模型保存目录
-    os.makedirs(args.save_path, exist_ok=True)
-
-    # 加载数据集
-    train_dataset = Dataset_LeftAtrium(args.root_path, args.list_dir, split="train", img_size=args.img_size)
-    val_dataset = Dataset_LeftAtrium(args.root_path, args.list_dir, split="test_vol", img_size=args.img_size)  # 原项目用 test_vol 做验证
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4)
-
-    # 初始化模型
-    model = BACFormer(num_classes=args.num_classes, img_size=args.img_size)
-
-    # 开始训练
-    train(model, train_loader, val_loader, args)
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    train_dataset = Dataset_LeftAtrium(root_path=args.root_path, list_dir=args.list_dir, split="train",
+                                       img_size=args.img_size)
+    val_dataset = Dataset_LeftAtrium(root_path=args.root_path, list_dir=args.list_dir, split="test",
+                                     img_size=args.img_size)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+
+    model = BACFormer(num_classes=args.num_classes)
+    if args.resume:
+        model.load_state_dict(torch.load(args.resume, map_location="cpu"))
+
+    trainer = Trainer(model, train_loader, val_loader, args)
+    trainer.train()
