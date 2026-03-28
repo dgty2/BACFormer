@@ -12,7 +12,7 @@ if exist "weights\best_model.pth" (
 ) else (
     echo 未找到权重，开始自动训练模型...
     echo 训练时长：显卡≈30分钟 | CPU≈5小时
-    python train.py --dataset LeftAtrium --root_path %~dp0 --max_epochs 50 --output_dir weights --img_size 224 --batch_size 4 --base_lr 0.05 --val_epoch 10 --num_classes 2
+    python train.py --dataset LeftAtrium --root_path %~dp0 --max_epochs 50 --output_dir weights --img_size 224 --batch_size 4 --base_lr 0.001 --val_epoch 10 --num_classes 2
     echo 训练完成！启动GUI工具...
     python main.py
 )

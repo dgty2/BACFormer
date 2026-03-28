@@ -5,9 +5,12 @@ from PyQt5.QtCore import Qt, pyqtSlot
 from PyQt5.QtGui import QPixmap
 import os
 import numpy as np
+from scipy.ndimage import label, sum_labels
+import cv2
 from core.model import load_bacformer_model, predict_mask
 from core.metrics import calculate_la_geometry, calculate_lavmax_single_plane, calculate_dice
 from core.utils import load_nii, load_label_mask, slice_to_qimage, export_excel_report
+
 
 class LAMeasureWindow(QMainWindow):
     def __init__(self, weight_path="weights/best_model.pth"):
@@ -15,7 +18,6 @@ class LAMeasureWindow(QMainWindow):
         self.setWindowTitle("左心房容积测量工具")
         self.setGeometry(100, 100, 1200, 800)
 
-        # 初始化变量
         self.img_data = None
         self.pixdim = None
         self.mask = None
@@ -25,11 +27,11 @@ class LAMeasureWindow(QMainWindow):
         self.model = None
         self.device = None
 
-        # 尝试加载模型权重
         try:
             self.model, self.device = load_bacformer_model(weight_path)
+            QMessageBox.information(self, "成功", "模型权重加载成功！")
         except Exception as e:
-            QMessageBox.warning(self, "提示", f"模型权重加载失败：{str(e)}\n可先手动加载掩码计算")
+            QMessageBox.warning(self, "提示", f"模型权重加载失败：{str(e)}<br>可先手动加载掩码计算")
 
         self._init_ui()
 
@@ -38,7 +40,6 @@ class LAMeasureWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
-        # 左侧：图像显示区
         left_layout = QVBoxLayout()
         self.img_label = QLabel()
         self.img_label.setAlignment(Qt.AlignCenter)
@@ -49,10 +50,8 @@ class LAMeasureWindow(QMainWindow):
         self.slice_slider.valueChanged.connect(self._on_slice_change)
         left_layout.addWidget(self.slice_slider)
 
-        # 右侧：功能区
         right_layout = QVBoxLayout()
 
-        # 1. 文件操作
         file_group = QGroupBox("文件操作")
         file_layout = QVBoxLayout()
         self.open_btn = QPushButton("打开 NII 影像")
@@ -61,7 +60,6 @@ class LAMeasureWindow(QMainWindow):
         file_group.setLayout(file_layout)
         right_layout.addWidget(file_group)
 
-        # 2. 分割操作
         seg_group = QGroupBox("分割操作")
         seg_layout = QVBoxLayout()
         self.auto_seg_btn = QPushButton("自动分割左心房")
@@ -76,7 +74,6 @@ class LAMeasureWindow(QMainWindow):
         seg_group.setLayout(seg_layout)
         right_layout.addWidget(seg_group)
 
-        # 3. 计算操作
         calc_group = QGroupBox("容积计算")
         calc_layout = QVBoxLayout()
         self.calc_btn = QPushButton("计算 LAVmax")
@@ -86,7 +83,6 @@ class LAMeasureWindow(QMainWindow):
         calc_group.setLayout(calc_layout)
         right_layout.addWidget(calc_group)
 
-        # 4. 结果显示
         result_group = QGroupBox("测量结果")
         result_layout = QGridLayout()
         self.area_edit = QLineEdit(readOnly=True)
@@ -105,7 +101,6 @@ class LAMeasureWindow(QMainWindow):
         result_group.setLayout(result_layout)
         right_layout.addWidget(result_group)
 
-        # 5. 报告导出
         export_group = QGroupBox("报告导出")
         export_layout = QVBoxLayout()
         self.export_btn = QPushButton("导出 Excel 报告")
@@ -133,7 +128,7 @@ class LAMeasureWindow(QMainWindow):
                 self.current_slice = 0
                 pixmap = slice_to_qimage(self.img_data)
             else:
-                self.slice_slider.setRange(0, self.img_data.shape[-1]-1)
+                self.slice_slider.setRange(0, self.img_data.shape[-1] - 1)
                 self.current_slice = self.img_data.shape[-1] // 2
                 pixmap = slice_to_qimage(self.img_data[..., self.current_slice])
 
@@ -141,7 +136,7 @@ class LAMeasureWindow(QMainWindow):
             self.auto_seg_btn.setEnabled(self.model is not None)
             self.load_gt_btn.setEnabled(True)
             self._clear_results()
-            QMessageBox.information(self, "成功", f"加载影像：{self.case_id}\n像素间距：{self.pixdim} mm")
+            QMessageBox.information(self, "成功", f"加载影像：{self.case_id}<br>像素间距：{self.pixdim} mm")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载失败：{str(e)}")
 
@@ -164,14 +159,16 @@ class LAMeasureWindow(QMainWindow):
         try:
             self.auto_seg_btn.setText("分割中...")
             self.auto_seg_btn.setEnabled(False)
+
             if len(self.img_data.shape) == 2:
                 self.mask = predict_mask(self.model, self.device, self.img_data)
                 pixmap = slice_to_qimage(self.img_data, self.mask)
             else:
-                self.mask = np.zeros_like(self.img_data)
+                self.mask = np.zeros_like(self.img_data, dtype=np.uint8)
                 for i in range(self.img_data.shape[-1]):
                     self.mask[..., i] = predict_mask(self.model, self.device, self.img_data[..., i])
                 pixmap = slice_to_qimage(self.img_data[..., self.current_slice], self.mask[..., self.current_slice])
+
             self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
             self.calc_btn.setEnabled(True)
             self.auto_seg_btn.setText("自动分割左心房")
@@ -191,10 +188,17 @@ class LAMeasureWindow(QMainWindow):
             self.load_gt_btn.setText("加载中...")
             self.load_gt_btn.setEnabled(False)
             self.mask = load_label_mask(self.current_file_path)
+            self.mask = (self.mask > 0).astype(np.uint8)
+            labeled, n_labels = label(self.mask)
+            if n_labels > 0:
+                max_label = max(range(1, n_labels + 1), key=lambda x: sum_labels(self.mask == x, labeled))
+                self.mask = (labeled == max_label).astype(np.uint8)
+
             if len(self.img_data.shape) == 2:
                 pixmap = slice_to_qimage(self.img_data, self.mask)
             else:
                 pixmap = slice_to_qimage(self.img_data[..., self.current_slice], self.mask[..., self.current_slice])
+
             self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
             self.calc_btn.setEnabled(True)
             self.load_gt_btn.setText("加载手动掩码")
@@ -215,22 +219,29 @@ class LAMeasureWindow(QMainWindow):
                 mask_slice = self.mask
             else:
                 mask_slice = self.mask[..., self.current_slice]
+
             area, long_axis = calculate_la_geometry(mask_slice, self.pixdim)
             lavmax = calculate_lavmax_single_plane(area, long_axis)
             dice = None
+
             try:
                 gt_mask = load_label_mask(self.current_file_path)
                 if len(gt_mask.shape) == 3:
                     gt_mask = gt_mask[..., self.current_slice]
+                gt_mask = (gt_mask > 0).astype(np.uint8)
                 dice = calculate_dice(mask_slice, gt_mask)
             except:
                 pass
-            self.area_edit.setText(str(area))
-            self.long_axis_edit.setText(str(long_axis))
-            self.lavmax_edit.setText(str(lavmax))
-            self.dice_edit.setText(str(dice) if dice else "无")
+
+            dice_str = f"{dice:.4f}" if dice is not None else "无"
+            self.area_edit.setText(f"{area:.2f}")
+            self.long_axis_edit.setText(f"{long_axis:.2f}")
+            self.lavmax_edit.setText(f"{lavmax:.2f}")
+            self.dice_edit.setText(dice_str)
             self.export_btn.setEnabled(True)
-            QMessageBox.information(self, "计算完成", f"LAVmax：{lavmax} mL\nDice：{dice if dice else '无'}")
+
+            QMessageBox.information(self, "计算完成",
+                                    f"LAVmax：{lavmax:.2f} mL<br>Dice：{dice_str}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"计算失败：{str(e)}")
 
@@ -245,7 +256,7 @@ class LAMeasureWindow(QMainWindow):
             lavmax = float(self.lavmax_edit.text())
             dice = float(self.dice_edit.text()) if self.dice_edit.text() != "无" else None
             excel_path = export_excel_report(self.case_id, area, long_axis, lavmax, dice, save_path)
-            QMessageBox.information(self, "成功", f"报告已导出：\n{excel_path}")
+            QMessageBox.information(self, "成功", f"报告已导出：<br>{excel_path}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
 
