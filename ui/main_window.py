@@ -1,8 +1,9 @@
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QPushButton, QLabel, QFileDialog, QSlider,
-                             QLineEdit, QMessageBox, QGroupBox, QGridLayout)
+                             QLineEdit, QMessageBox, QGroupBox, QGridLayout,
+                             QRadioButton, QSpinBox)
 from PyQt5.QtCore import Qt, pyqtSlot
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QMouseEvent
 import os
 import numpy as np
 from scipy.ndimage import label, sum_labels
@@ -18,6 +19,7 @@ class LAMeasureWindow(QMainWindow):
         self.setWindowTitle("左心房容积测量工具")
         self.setGeometry(100, 100, 1200, 800)
 
+        # 数据存储（仅保留四腔心）
         self.img_data = None
         self.pixdim = None
         self.mask = None
@@ -27,6 +29,12 @@ class LAMeasureWindow(QMainWindow):
         self.model = None
         self.device = None
 
+        # 手动编辑相关（坐标已修复）
+        self.edit_mode = None  # None, 'brush', 'eraser'
+        self.brush_size = 5
+        self.is_drawing = False
+
+        # 加载模型
         try:
             self.model, self.device = load_bacformer_model(weight_path)
             QMessageBox.information(self, "成功", "模型权重加载成功！")
@@ -40,18 +48,26 @@ class LAMeasureWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
+        # 左侧：图像显示
         left_layout = QVBoxLayout()
         self.img_label = QLabel()
         self.img_label.setAlignment(Qt.AlignCenter)
         self.img_label.setStyleSheet("border: 1px solid #ccc; min-width: 800px; min-height: 600px;")
+        # 鼠标事件，用于手动编辑
+        self.img_label.mousePressEvent = self._mouse_press
+        self.img_label.mouseMoveEvent = self._mouse_move
+        self.img_label.mouseReleaseEvent = self._mouse_release
         left_layout.addWidget(self.img_label)
 
+        # 切片滑块
         self.slice_slider = QSlider(Qt.Horizontal)
         self.slice_slider.valueChanged.connect(self._on_slice_change)
         left_layout.addWidget(self.slice_slider)
 
+        # 右侧：控制面板
         right_layout = QVBoxLayout()
 
+        # 1. 文件操作（仅保留四腔心）
         file_group = QGroupBox("文件操作")
         file_layout = QVBoxLayout()
         self.open_btn = QPushButton("打开 NII 影像")
@@ -60,6 +76,7 @@ class LAMeasureWindow(QMainWindow):
         file_group.setLayout(file_layout)
         right_layout.addWidget(file_group)
 
+        # 2. 分割操作
         seg_group = QGroupBox("分割操作")
         seg_layout = QVBoxLayout()
         self.auto_seg_btn = QPushButton("自动分割左心房")
@@ -74,6 +91,29 @@ class LAMeasureWindow(QMainWindow):
         seg_group.setLayout(seg_layout)
         right_layout.addWidget(seg_group)
 
+        # 3. 手动编辑（保留，坐标已修复）
+        edit_group = QGroupBox("手动编辑分割结果")
+        edit_layout = QVBoxLayout()
+        self.brush_btn = QRadioButton("画笔（添加区域）")
+        self.eraser_btn = QRadioButton("橡皮擦（删除区域）")
+        self.brush_btn.toggled.connect(self._on_edit_mode_change)
+        self.eraser_btn.toggled.connect(self._on_edit_mode_change)
+
+        size_layout = QHBoxLayout()
+        size_layout.addWidget(QLabel("画笔大小:"))
+        self.brush_size_spin = QSpinBox()
+        self.brush_size_spin.setRange(1, 20)
+        self.brush_size_spin.setValue(5)
+        self.brush_size_spin.valueChanged.connect(lambda v: setattr(self, 'brush_size', v))
+        size_layout.addWidget(self.brush_size_spin)
+
+        edit_layout.addWidget(self.brush_btn)
+        edit_layout.addWidget(self.eraser_btn)
+        edit_layout.addLayout(size_layout)
+        edit_group.setLayout(edit_layout)
+        right_layout.addWidget(edit_group)
+
+        # 4. 容积计算
         calc_group = QGroupBox("容积计算")
         calc_layout = QVBoxLayout()
         self.calc_btn = QPushButton("计算 LAVmax")
@@ -83,13 +123,13 @@ class LAMeasureWindow(QMainWindow):
         calc_group.setLayout(calc_layout)
         right_layout.addWidget(calc_group)
 
+        # 5. 结果显示
         result_group = QGroupBox("测量结果")
         result_layout = QGridLayout()
         self.area_edit = QLineEdit(readOnly=True)
         self.long_axis_edit = QLineEdit(readOnly=True)
         self.lavmax_edit = QLineEdit(readOnly=True)
         self.dice_edit = QLineEdit(readOnly=True)
-
         result_layout.addWidget(QLabel("左心房面积(mm²)："), 0, 0)
         result_layout.addWidget(self.area_edit, 0, 1)
         result_layout.addWidget(QLabel("长轴长度(mm)："), 1, 0)
@@ -101,6 +141,7 @@ class LAMeasureWindow(QMainWindow):
         result_group.setLayout(result_layout)
         right_layout.addWidget(result_group)
 
+        # 6. 导出
         export_group = QGroupBox("报告导出")
         export_layout = QVBoxLayout()
         self.export_btn = QPushButton("导出 Excel 报告")
@@ -113,6 +154,7 @@ class LAMeasureWindow(QMainWindow):
         main_layout.addLayout(left_layout, 7)
         main_layout.addLayout(right_layout, 3)
 
+    # -------------------------- 文件加载（仅四腔心） --------------------------
     @pyqtSlot()
     def _open_nii_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择 NII 影像", "", "NII Files (*.nii *.nii.gz)")
@@ -120,7 +162,6 @@ class LAMeasureWindow(QMainWindow):
             return
         self.current_file_path = file_path
         self.case_id = os.path.basename(file_path).replace(".nii.gz", "").replace(".nii", "")
-
         try:
             self.img_data, self.pixdim = load_nii(file_path)
             if len(self.img_data.shape) == 2:
@@ -131,7 +172,6 @@ class LAMeasureWindow(QMainWindow):
                 self.slice_slider.setRange(0, self.img_data.shape[-1] - 1)
                 self.current_slice = self.img_data.shape[-1] // 2
                 pixmap = slice_to_qimage(self.img_data[..., self.current_slice])
-
             self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
             self.auto_seg_btn.setEnabled(self.model is not None)
             self.load_gt_btn.setEnabled(True)
@@ -140,17 +180,7 @@ class LAMeasureWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载失败：{str(e)}")
 
-    @pyqtSlot(int)
-    def _on_slice_change(self, idx):
-        if self.img_data is None:
-            return
-        self.current_slice = idx
-        if len(self.img_data.shape) == 3:
-            slice_data = self.img_data[..., idx]
-            mask_slice = self.mask[..., idx] if (self.mask is not None and len(self.mask.shape) == 3) else self.mask
-            pixmap = slice_to_qimage(slice_data, mask_slice)
-            self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
-
+    # -------------------------- 分割 --------------------------
     @pyqtSlot()
     def _auto_segment(self):
         if self.img_data is None or self.model is None:
@@ -159,7 +189,6 @@ class LAMeasureWindow(QMainWindow):
         try:
             self.auto_seg_btn.setText("分割中...")
             self.auto_seg_btn.setEnabled(False)
-
             if len(self.img_data.shape) == 2:
                 self.mask = predict_mask(self.model, self.device, self.img_data)
                 pixmap = slice_to_qimage(self.img_data, self.mask)
@@ -168,7 +197,6 @@ class LAMeasureWindow(QMainWindow):
                 for i in range(self.img_data.shape[-1]):
                     self.mask[..., i] = predict_mask(self.model, self.device, self.img_data[..., i])
                 pixmap = slice_to_qimage(self.img_data[..., self.current_slice], self.mask[..., self.current_slice])
-
             self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
             self.calc_btn.setEnabled(True)
             self.auto_seg_btn.setText("自动分割左心房")
@@ -193,12 +221,10 @@ class LAMeasureWindow(QMainWindow):
             if n_labels > 0:
                 max_label = max(range(1, n_labels + 1), key=lambda x: sum_labels(self.mask == x, labeled))
                 self.mask = (labeled == max_label).astype(np.uint8)
-
             if len(self.img_data.shape) == 2:
                 pixmap = slice_to_qimage(self.img_data, self.mask)
             else:
                 pixmap = slice_to_qimage(self.img_data[..., self.current_slice], self.mask[..., self.current_slice])
-
             self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
             self.calc_btn.setEnabled(True)
             self.load_gt_btn.setText("加载手动掩码")
@@ -209,6 +235,88 @@ class LAMeasureWindow(QMainWindow):
             self.load_gt_btn.setEnabled(True)
             QMessageBox.critical(self, "错误", f"加载失败：{str(e)}")
 
+    # -------------------------- 手动编辑（坐标已修复） --------------------------
+    def _on_edit_mode_change(self):
+        if self.brush_btn.isChecked():
+            self.edit_mode = 'brush'
+        elif self.eraser_btn.isChecked():
+            self.edit_mode = 'eraser'
+        else:
+            self.edit_mode = None
+
+    def _get_image_coords(self, event):
+        # 修复后的坐标转换：计算居中偏移，把鼠标坐标转成图像像素坐标
+        pixmap = self.img_label.pixmap()
+        if pixmap is None or self.img_data is None:
+            return None, None
+
+        # 1. 原始图像尺寸
+        if len(self.img_data.shape) == 2:
+            img_h, img_w = self.img_data.shape
+        else:
+            img_h, img_w = self.img_data.shape[:2]
+
+        # 2. 标签的尺寸
+        label_w = self.img_label.width()
+        label_h = self.img_label.height()
+
+        # 3. 缩放后的图像尺寸（保持比例）
+        scale = min(label_w / img_w, label_h / img_h)
+        scaled_w = int(img_w * scale)
+        scaled_h = int(img_h * scale)
+
+        # 4. 计算居中的偏移
+        x_offset = (label_w - scaled_w) / 2
+        y_offset = (label_h - scaled_h) / 2
+
+        # 5. 鼠标在标签内的坐标，减去偏移
+        mouse_x = event.x() - self.img_label.x()
+        mouse_y = event.y() - self.img_label.y()
+
+        # 6. 转换到原始图像坐标
+        x = int((mouse_x - x_offset) / scale)
+        y = int((mouse_y - y_offset) / scale)
+
+        # 边界检查，防止越界
+        x = max(0, min(x, img_w - 1))
+        y = max(0, min(y, img_h - 1))
+        return x, y
+
+    def _mouse_press(self, event: QMouseEvent):
+        if self.edit_mode is None or self.mask is None:
+            return
+        self.is_drawing = True
+        x, y = self._get_image_coords(event)
+        if x is None:
+            return
+        self._draw_on_mask(x, y)
+
+    def _mouse_move(self, event: QMouseEvent):
+        if not self.is_drawing or self.edit_mode is None:
+            return
+        x, y = self._get_image_coords(event)
+        if x is None:
+            return
+        self._draw_on_mask(x, y)
+        # 实时刷新显示
+        if len(self.img_data.shape) == 2:
+            pixmap = slice_to_qimage(self.img_data, self.mask)
+        else:
+            pixmap = slice_to_qimage(self.img_data[..., self.current_slice], self.mask[..., self.current_slice])
+        self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
+
+    def _mouse_release(self, event: QMouseEvent):
+        self.is_drawing = False
+
+    def _draw_on_mask(self, x, y):
+        if len(self.mask.shape) == 2:
+            mask_slice = self.mask
+        else:
+            mask_slice = self.mask[..., self.current_slice]
+        # 画圆
+        cv2.circle(mask_slice, (x, y), self.brush_size, 1 if self.edit_mode == 'brush' else 0, -1)
+
+    # -------------------------- 计算（仅单平面法） --------------------------
     @pyqtSlot()
     def _calculate_lavmax(self):
         if self.mask is None:
@@ -219,11 +327,10 @@ class LAMeasureWindow(QMainWindow):
                 mask_slice = self.mask
             else:
                 mask_slice = self.mask[..., self.current_slice]
-
             area, long_axis = calculate_la_geometry(mask_slice, self.pixdim)
             lavmax = calculate_lavmax_single_plane(area, long_axis)
-            dice = None
 
+            dice = None
             try:
                 gt_mask = load_label_mask(self.current_file_path)
                 if len(gt_mask.shape) == 3:
@@ -239,11 +346,22 @@ class LAMeasureWindow(QMainWindow):
             self.lavmax_edit.setText(f"{lavmax:.2f}")
             self.dice_edit.setText(dice_str)
             self.export_btn.setEnabled(True)
-
             QMessageBox.information(self, "计算完成",
                                     f"LAVmax：{lavmax:.2f} mL<br>Dice：{dice_str}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"计算失败：{str(e)}")
+
+    # -------------------------- 其他 --------------------------
+    @pyqtSlot(int)
+    def _on_slice_change(self, idx):
+        if self.img_data is None:
+            return
+        self.current_slice = idx
+        if len(self.img_data.shape) == 3:
+            slice_data = self.img_data[..., idx]
+            mask_slice = self.mask[..., idx] if (self.mask is not None and len(self.mask.shape) == 3) else self.mask
+            pixmap = slice_to_qimage(slice_data, mask_slice)
+            self.img_label.setPixmap(pixmap.scaled(self.img_label.size(), Qt.KeepAspectRatio))
 
     @pyqtSlot()
     def _export_report(self):
