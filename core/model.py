@@ -15,7 +15,7 @@ def load_bacformer_model(weight_path):
 
 def predict_mask(model, device, img_data):
     """
-    微调版：放宽右侧截断阈值，保留更多左心房区域
+    针对镜像影像，调整为左侧截断，自动定位右侧的左心房
     """
     # 1. 预处理
     img = img_data.copy()
@@ -27,20 +27,21 @@ def predict_mask(model, device, img_data):
     # 3. 类别修正
     pred = torch.argmax(F.softmax(output, dim=1), dim=1).squeeze().cpu().numpy()
     pred = (pred == 1).astype(np.uint8)
-    # 4. 调整右侧截断阈值：从112（50%）改为140（约62.5%），保留更多左心房
-    pred = pred[:, :140]  # 只截断更靠右的部分，保留左心房右侧
+    # 针对镜像影像，改为左侧截断：去掉左侧的左心室区域，保留右侧62.5%的左心房区域
+    # 224宽度下，左侧截断前84列，保留后140列（84=224-140）
+    pred = pred[:, 84:]
     # 5. 形态学去噪
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     pred = cv2.morphologyEx(pred, cv2.MORPH_OPEN, kernel)
-    # 6. 保留最大的连通域
+    # 6. 保留右侧区域内最大的连通域（也就是右半部分的左心房）
     labeled, n_labels = label(pred)
     if n_labels > 0:
         component_sizes = [sum_labels(pred == i, labeled) for i in range(1, n_labels + 1)]
         max_label = component_sizes.index(max(component_sizes)) + 1
         pred = (labeled == max_label).astype(np.uint8)
-    # 7. 恢复尺寸，同步调整右侧截断位置
+    # 恢复尺寸，同步调整左侧截断位置：把结果放到右侧，左侧补0
     full_pred = np.zeros((224, 224), dtype=np.uint8)
-    full_pred[:, :140] = pred
+    full_pred[:, 84:] = pred
     pred = full_pred
     # 8. 异常面积限制
     total_pixels = img_data.shape[0] * img_data.shape[1]
