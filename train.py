@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
     # 初始化模型，并且把整个模型移到正确的设备
     model = BACFormer(num_classes=args.num_classes)
-    model = model.to(device)  # 关键修复：把整个模型的所有权重都移到GPU/CPU，解决设备不匹配问题
+    model = model.to(device)
 
     # 加载断点权重
     if args.resume:
@@ -54,5 +54,6 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint)
 
     # 初始化训练器
-    trainer = Trainer(model, train_loader, val_loader, args, device=device)
+    trainer = Trainer(model, train_loader, val_loader, args)
+    trainer.device = device  # 把设备信息传给训练器
     trainer.train()

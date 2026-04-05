@@ -11,11 +11,9 @@ class Dataset_LeftAtrium(Dataset):
         self.root_path = root_path
         self.split = split
         self.img_size = img_size
-
         list_path = os.path.join(list_dir, f"{split}.txt")
         with open(list_path, 'r') as f:
             self.names = [line.strip() for line in f.readlines()]
-
         # 匹配你的路径：img/label 在 lists 文件夹下
         self.img_dir = os.path.join(root_path, "lists", "img")
         self.label_dir = os.path.join(root_path, "lists", "label")
@@ -25,12 +23,13 @@ class Dataset_LeftAtrium(Dataset):
 
     def __getitem__(self, idx):
         name = self.names[idx]
-
         img_path = os.path.join(self.img_dir, f"{name}.nii.gz")
         label_path = os.path.join(self.label_dir, f"{name}_gt.nii.gz")
-
         img = nib.load(img_path).get_fdata()
         label = nib.load(label_path).get_fdata()
+
+        # 关键修复：把标签二值化，所有大于0的都变成1，解决标签超出范围的问题
+        label = (label > 0).astype(np.float32)
 
         # 缩放
         img = zoom(img, (self.img_size / img.shape[0], self.img_size / img.shape[1]), order=1)
@@ -39,5 +38,4 @@ class Dataset_LeftAtrium(Dataset):
         # 单通道张量 [1, H, W]
         img = torch.from_numpy(img).float().unsqueeze(0)
         label = torch.from_numpy(label).long()
-
         return img, label
