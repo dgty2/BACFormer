@@ -25,18 +25,27 @@ class BA(nn.Module):
             in_channels (int): 输入通道数
         """
         super(BA, self).__init__()
+        # 7x7深度可分离卷积，用于提取基础空间特征
         self.depthwise_conv1 = nn.Conv2d(in_channels, in_channels, kernel_size=7, padding=3, groups=in_channels)
+        # 5x1条带卷积，捕捉水平方向特征
         self.strip_conv_5x1 = nn.Conv2d(in_channels, in_channels, kernel_size=(5, 1), padding=(2, 0),
                                         groups=in_channels)
+        # 1x5条带卷积，捕捉垂直方向特征
         self.strip_conv_1x5 = nn.Conv2d(in_channels, in_channels, kernel_size=(1, 5), padding=(0, 2),
                                         groups=in_channels)
+        # 1x3短条带卷积，捕捉细粒度垂直特征
         self.strip_conv_1x3 = nn.Conv2d(in_channels, in_channels, kernel_size=(1, 3), padding=(0, 1),
                                         groups=in_channels)
+        # 3x1短条带卷积，捕捉细粒度水平特征
         self.strip_conv_3x1 = nn.Conv2d(in_channels, in_channels, kernel_size=(3, 1), padding=(1, 0),
                                         groups=in_channels)
+        # 1x1逐点卷积，用于通道间特征融合
         self.pointwise_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        # 批归一化层，稳定训练过程
         self.bn = nn.BatchNorm2d(in_channels)
+        # GELU激活函数，提供非线性变换
         self.gelu = nn.GELU()
+        # Sigmoid激活函数，生成注意力权重
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -49,7 +58,9 @@ class BA(nn.Module):
         Returns:
             torch.Tensor: 增强后的特征图
         """
+        # 获取输入设备，确保所有模块在同一设备上
         device = x.device
+        # 将所有子模块移动到输入张量所在设备（避免设备不匹配）
         self.depthwise_conv1 = self.depthwise_conv1.to(device)
         self.strip_conv_5x1 = self.strip_conv_5x1.to(device)
         self.strip_conv_1x5 = self.strip_conv_1x5.to(device)
@@ -60,16 +71,24 @@ class BA(nn.Module):
         self.gelu = self.gelu.to(device)
         self.sigmoid = self.sigmoid.to(device)
 
+        # 执行7x7深度卷积，提取基础空间特征
         x_DWConv = self.depthwise_conv1(x)
 
+        # 多尺度条带卷积分支：先5x1再1x5，最后用sigmoid生成注意力图
         x_DWStripConv5=self.sigmoid(self.strip_conv_1x5(self.gelu(self.strip_conv_5x1(x_DWConv))))
+        # 多尺度条带卷积分支：先3x1再1x3，生成更精细的注意力图
         x_DWStripConv3 = self.sigmoid(self.strip_conv_1x3(self.gelu(self.strip_conv_3x1(x_DWConv))))
+        # 融合两个尺度的注意力图
         x_DWStripConv = x_DWStripConv5 + x_DWStripConv3
 
+        # Hadamard积：将注意力图与原始特征逐元素相乘
         x_hadamard = x * x_DWStripConv
+        # 残差连接：将加权特征与原特征相加
         x_fusion = x_hadamard + x
 
+        # 第一阶段卷积：逐点卷积+批归一化+GELU激活
         x_Conv_Stage1 = self.gelu(self.bn(self.pointwise_conv(x_fusion)))
+        # 第二阶段卷积：再次逐点卷积增强特征
         x_Conv_Stage2 = self.gelu(self.bn(self.pointwise_conv(x_Conv_Stage1)))
 
 
@@ -98,25 +117,39 @@ def bacam_op(features, ghost_mul, ghost_add, h_attn, lam, gamma,
     Returns:
         torch.Tensor: 增强后的特征图
     """
+    # 获取批次大小和通道数
     _B, _C = features.shape[:2]
+    # 缩写卷积核大小
     ks = kernel_size
+    # 根据lambda参数计算ghost_mul：如果lam为0则使用全1张量
     ghost_mul = ghost_mul ** lam if lam != 0 \
         else torch.ones(_B, _C, ks, ks, device=features.device, requires_grad=False)
+    # 根据gamma参数计算ghost_add：如果gamma为0则使用全0张量
     ghost_add = ghost_add * gamma if gamma != 0 \
         else torch.zeros(_B, _C, ks, ks, device=features.device, requires_grad=False)
+    # 解包特征图的维度
     B, C, H, W = features.shape
+    # 计算padding大小，保持输出尺寸
     _pad = kernel_size // 2 * dilation
 
+    # 创建边界注意力模块
     ba = BA(C)
+    # 对特征图应用边界注意力增强
     features = ba(features)
 
+    # 使用unfold展开特征图为局部块，便于逐位置应用注意力
     features = F.unfold(
         features, kernel_size=kernel_size, dilation=dilation, padding=_pad, stride=stride) \
         .reshape(B, C, kernel_size ** 2, H * W)
+    # 重塑ghost_mul为合适的形状
     ghost_mul = ghost_mul.reshape(B, C, kernel_size ** 2, 1)
+    # 重塑ghost_add为合适的形状
     ghost_add = ghost_add.reshape(B, C, kernel_size ** 2, 1)
+    # 重塑注意力图为合适的形状
     h_attn = h_attn.reshape(B, 1, kernel_size ** 2, H * W)
+    # 计算动态滤波器：ghost_mul * attention + ghost_add
     filters = ghost_mul * h_attn + ghost_add
+    # 应用滤波器并重塑回原始空间尺寸
     return (features * filters).sum(2).reshape(B, C, H, W)
 
 
@@ -151,65 +184,97 @@ class BACAM(nn.Module):
             gamma (float): gamma参数
         """
         super().__init__()
+        # 保存特征维度
         self.dim = dim
+        # 保存注意力头数
         self.num_heads = num_heads
 
+        # 计算Q和K的维度：约为总维度的2/3
         self.dim_qk = self.dim // 3 * 2
+        # V的维度等于总维度
         self.dim_v = dim
 
 
 
+        # 保存卷积核大小
         self.kernel_size = kernel_size
+        # 保存步长
         self.stride = stride
+        # 保存膨胀率
         self.dilation = dilation
 
+        # 计算每个头的维度
         head_dim = self.dim_v // num_heads
+        # 设置缩放因子：默认为头维度的-0.5次方
         self.scale = qk_scale or head_dim ** -0.5
 
+        # 如果dim_qk不能被group_width整除，则向上取整
         if self.dim_qk % group_width != 0:
             self.dim_qk = math.ceil(float(self.dim_qk) / group_width) * group_width
 
+        # 保存分组宽度
         self.group_width = group_width
+        # 保存分组数
         self.groups = groups
+        # 保存lambda参数
         self.lam = lam
+        # 保存gamma参数
         self.gamma = gamma
+        # 打印超参数配置信息
         print(f'lambda = {lam}, gamma = {gamma}, scale = {self.scale}')
 
+        # 预投影层：将输入映射到Q、K、V空间
         self.pre_proj = nn.Conv2d(dim, self.dim_qk * 2 + self.dim_v, 1, bias=qkv_bias)
+        # 注意力生成网络：深度卷积+GELU+逐点卷积
         self.attn = nn.Sequential(
             nn.Conv2d(self.dim_qk, self.dim_qk, kernel_size, padding=(kernel_size // 2) * dilation,
                       dilation=dilation, groups=self.dim_qk // group_width),
             nn.GELU(),
             nn.Conv2d(self.dim_qk, kernel_size ** 2 * num_heads, 1, groups=groups))
 
+        # 根据lam和gamma的配置初始化ghost head参数
         if self.lam != 0 and self.gamma != 0:
+            # 同时使用ghost_mul和ghost_add
             ghost_mul = torch.randn(1, 1, self.dim_v, kernel_size, kernel_size)
             ghost_add = torch.zeros(1, 1, self.dim_v, kernel_size, kernel_size)
             trunc_normal_(ghost_add, std=.02)
             self.ghost_head = nn.Parameter(torch.cat((ghost_mul, ghost_add), dim=0), requires_grad=True)
         elif self.lam == 0 and self.gamma != 0:
+            # 只使用ghost_add
             ghost_add = torch.zeros(1, self.dim_v, kernel_size, kernel_size)
             trunc_normal_(ghost_add, std=.02)
             self.ghost_head = nn.Parameter(ghost_add, requires_grad=True)
         elif self.lam != 0 and self.gamma == 0:
+            # 只使用ghost_mul
             ghost_mul = torch.randn(1, self.dim_v, kernel_size, kernel_size)
             self.ghost_head = nn.Parameter(ghost_mul, requires_grad=True)
         else:
+            # 不使用ghost机制
             self.ghost_head = None
 
+        # 注意力dropout层
         self.attn_drop = nn.Dropout(attn_drop)
+        # 后投影层：线性变换回原始维度
         self.post_proj = nn.Linear(self.dim_v, dim)
+        # 投影dropout层
         self.proj_drop = nn.Dropout(proj_drop)
+        # Q的深度卷积层
         self.conv_q = nn.Conv2d(dim, dim, 3, 1, "same", bias=True,
                                 groups=dim)
+        # Q的层归一化
         self.layernorm_q = nn.LayerNorm(dim, eps=1e-5)
+        # K的深度卷积层
         self.conv_k = nn.Conv2d(dim, dim, 3, 1, "same", bias=True,
                                 groups=dim)
+        # K的层归一化
         self.layernorm_k = nn.LayerNorm(dim, eps=1e-5)
+        # V的深度卷积层
         self.conv_v = nn.Conv2d(dim, dim, 3, 1, "same", bias=True,
                                 groups=dim)
+        # V的层归一化
         self.layernorm_v = nn.LayerNorm(dim, eps=1e-5)
 
+        # QK的1x1卷积投影层
         self.conv_qk = nn.Conv2d(dim, self.dim_qk, 1)
 
     def _build_projection(self, x, qkv):
@@ -225,16 +290,19 @@ class BACAM(nn.Module):
         """
 
         if qkv == "q":
+            # 构建Q投影：ReLU +  permute + LayerNorm
             x1 = F.relu(self.conv_q(x))
             x1 = x1.permute(0, 2, 3, 1)
             x1 = self.layernorm_q(x1)
             proj = x1.permute(0, 3, 1, 2)
         elif qkv == "k":
+            # 构建K投影
             x1 = F.relu(self.conv_k(x))
             x1 = x1.permute(0, 2, 3, 1)
             x1 = self.layernorm_k(x1)
             proj = x1.permute(0, 3, 1, 2)
         elif qkv == "v":
+            # 构建V投影
             x1 = F.relu(self.conv_v(x))
             x1 = x1.permute(0, 2, 3, 1)
             x1 = self.layernorm_v(x1)
@@ -271,31 +339,48 @@ class BACAM(nn.Module):
         Returns:
             torch.Tensor: 输出特征序列
         """
+        # 获取批次大小、序列长度和通道数
         B, N, C = x.shape
+        # 将序列重塑为2D特征图
         x = x.reshape(B, H, W, C)
+        # 更新C为V的维度
         C = self.dim_v
+        # 缩写卷积核大小
         ks = self.kernel_size
+        # 缩写注意力头数
         G = self.num_heads
+        # 转换维度顺序为[B, C, H, W]
         x = x.permute(0, 3, 1, 2)
 
 
+        # 生成Q、K、V
         q, k, v = self.forward_conv(x)
+        # 对Q进行1x1卷积投影
         q = self.conv_qk(q)
+        # 对K进行1x1卷积投影
         k = self.conv_qk(k)
 
+        # 计算Hadamard积并缩放
         hadamard_product = q * k * self.scale
 
+        # 如果步长大于1，进行平均池化下采样
         if self.stride > 1:
             hadamard_product = F.avg_pool2d(hadamard_product, self.stride)
 
+        # 通过注意力网络生成注意力图
         h_attn = self.attn(hadamard_product)
 
+        # 重塑V为多头格式
         v = v.reshape(B * G, C // G, H, W)
+        # 重塑注意力图并应用softmax归一化
         h_attn = h_attn.reshape(B * G, -1, H, W).softmax(1)
+        # 应用注意力dropout
         h_attn = self.attn_drop(h_attn)
 
+        # 初始化ghost参数
         ghost_mul = None
         ghost_add = None
+        # 根据配置展开ghost head参数
         if self.lam != 0 and self.gamma != 0:
             gh = self.ghost_head.expand(2, B, C, ks, ks).reshape(2, B * G, C // G, ks, ks)
             ghost_mul, ghost_add = gh[0], gh[1]
@@ -304,11 +389,16 @@ class BACAM(nn.Module):
         elif self.lam != 0 and self.gamma == 0:
             ghost_mul = self.ghost_head.expand(B, C, ks, ks).reshape(B * G, C // G, ks, ks)
 
+        # 调用BACAM操作函数执行核心计算
         x = bacam_op(v, ghost_mul, ghost_add, h_attn, self.lam, self.gamma,
                     self.kernel_size, self.dilation, self.stride)
+        # 重塑输出为正确尺寸
         x = x.reshape(B, C, H // self.stride, W // self.stride)
+        # 转置维度并通过后投影层
         x = self.post_proj(x.permute(0, 2, 3, 1))
+        # 应用投影dropout
         x = self.proj_drop(x)
+        # 重塑回序列格式
         x = x.reshape(B, N, C)
         return x
 
