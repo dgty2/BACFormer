@@ -8,8 +8,22 @@ from torch.nn import functional as F
 from typing import Tuple
 from einops.layers.torch import Rearrange,Reduce
 
+
 class BA(nn.Module):
+    """
+    BA模块：边界注意力模块（Boundary Attention）
+    
+    使用深度可分离卷积和条带卷积提取多尺度边界特征
+    结合5x1、1x5、3x1、1x3等多种卷积核捕捉不同方向的边界信息
+    """
+    
     def __init__(self, in_channels):
+        """
+        初始化BA模块
+        
+        Args:
+            in_channels (int): 输入通道数
+        """
         super(BA, self).__init__()
         self.depthwise_conv1 = nn.Conv2d(in_channels, in_channels, kernel_size=7, padding=3, groups=in_channels)
         self.strip_conv_5x1 = nn.Conv2d(in_channels, in_channels, kernel_size=(5, 1), padding=(2, 0),
@@ -26,6 +40,15 @@ class BA(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
+        """
+        前向传播：提取边界注意力特征
+        
+        Args:
+            x (torch.Tensor): 输入特征图
+            
+        Returns:
+            torch.Tensor: 增强后的特征图
+        """
         device = x.device
         self.depthwise_conv1 = self.depthwise_conv1.to(device)
         self.strip_conv_5x1 = self.strip_conv_5x1.to(device)
@@ -52,8 +75,29 @@ class BA(nn.Module):
 
         return x_Conv_Stage2
 
+
 def bacam_op(features, ghost_mul, ghost_add, h_attn, lam, gamma,
             kernel_size=5, dilation=1, stride=1, version=''):
+    """
+    BACAM操作函数：边界注意力卷积注意力模块的核心运算
+    
+    结合ghost卷积和注意力机制，对特征图进行增强
+    
+    Args:
+        features (torch.Tensor): 输入特征图
+        ghost_mul (torch.Tensor): ghost乘法参数
+        ghost_add (torch.Tensor): ghost加法参数
+        h_attn (torch.Tensor): 注意力图
+        lam (float): lambda参数，控制ghost_mul的影响
+        gamma (float): gamma参数，控制ghost_add的影响
+        kernel_size (int): 卷积核大小
+        dilation (int): 膨胀率
+        stride (int): 步长
+        version (str): 版本标识
+        
+    Returns:
+        torch.Tensor: 增强后的特征图
+    """
     _B, _C = features.shape[:2]
     ks = kernel_size
     ghost_mul = ghost_mul ** lam if lam != 0 \
@@ -78,13 +122,34 @@ def bacam_op(features, ghost_mul, ghost_add, h_attn, lam, gamma,
 
 class BACAM(nn.Module):
     """
-    Implementation of enhanced local self-attention
+    BACAM类：增强的局部自注意力模块
+    
+    结合了边界注意力、ghost卷积和多头自注意力机制
+    用于提取更丰富的空间特征
     """
 
     def __init__(self, dim, num_heads, kernel_size=5,
                  stride=1, dilation=1, qkv_bias=False, qk_scale=None,
                  attn_drop=0., proj_drop=0., group_width=8, groups=1, lam=1,
                  gamma=1, **kwargs):
+        """
+        初始化BACAM模块
+        
+        Args:
+            dim (int): 特征维度
+            num_heads (int): 注意力头数
+            kernel_size (int): 卷积核大小
+            stride (int): 步长
+            dilation (int): 膨胀率
+            qkv_bias (bool): QKV是否使用偏置
+            qk_scale (float, optional): QK缩放因子
+            attn_drop (float): 注意力dropout率
+            proj_drop (float): 投影dropout率
+            group_width (int): 分组宽度
+            groups (int): 分组数
+            lam (float): lambda参数
+            gamma (float): gamma参数
+        """
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -148,6 +213,16 @@ class BACAM(nn.Module):
         self.conv_qk = nn.Conv2d(dim, self.dim_qk, 1)
 
     def _build_projection(self, x, qkv):
+        """
+        构建Q/K/V投影
+        
+        Args:
+            x (torch.Tensor): 输入特征
+            qkv (str): 投影类型（"q"、"k" 或 "v"）
+            
+        Returns:
+            torch.Tensor: 投影后的特征
+        """
 
         if qkv == "q":
             x1 = F.relu(self.conv_q(x))
@@ -168,6 +243,15 @@ class BACAM(nn.Module):
         return proj
 
     def forward_conv(self, x):
+        """
+        执行Q/K/V的卷积投影
+        
+        Args:
+            x (torch.Tensor): 输入特征图
+            
+        Returns:
+            tuple: (q, k, v) 查询、键、值三元组
+        """
         q = self._build_projection(x, "q")
         k = self._build_projection(x, "k")
         v = self._build_projection(x, "v")
@@ -175,6 +259,18 @@ class BACAM(nn.Module):
 
 
     def forward(self, x, H, W, mask=None):
+        """
+        前向传播：执行BACAM注意力计算
+        
+        Args:
+            x (torch.Tensor): 输入序列 [B, N, C]
+            H (int): 特征图高度
+            W (int): 特征图宽度
+            mask (optional): 注意力掩码
+            
+        Returns:
+            torch.Tensor: 输出特征序列
+        """
         B, N, C = x.shape
         x = x.reshape(B, H, W, C)
         C = self.dim_v
